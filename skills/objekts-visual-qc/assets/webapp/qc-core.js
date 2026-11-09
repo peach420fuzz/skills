@@ -13,14 +13,34 @@ export function normalizeViews(raw) {
   return [...new Set(String(raw || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean))];
 }
 
-export function checkFile(file, dimensions, rules = DEFAULTS) {
+// Identification only: full decoding remains mandatory in app.js.
+export function signatureMime(bytes) {
+  const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || 0);
+  const matches = (offset, values) => values.every((v, i) => b[offset + i] === v);
+  if (b.length >= 8 && matches(0, [137, 80, 78, 71, 13, 10, 26, 10])) return 'image/png';
+  if (b.length >= 3 && matches(0, [255, 216, 255])) return 'image/jpeg';
+  if (b.length >= 16 && matches(0, [82, 73, 70, 70]) && matches(8, [87, 69, 66, 80]) &&
+      (matches(12, [86, 80, 56, 32]) || matches(12, [86, 80, 56, 76]) || matches(12, [86, 80, 56, 88]))) return 'image/webp';
+  return '';
+}
+
+export function checkFile(file, dimensions, rules = DEFAULTS, header = null) {
   const issues = [];
-  if (!ALLOWED.has(file.type)) issues.push('Неподдерживаемый формат');
+  const type = String(file.type || '').toLowerCase();
+  const actual = signatureMime(header);
+  const ext = String(file.name || '').split('.').pop().toLowerCase();
+  const expected = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' }[ext];
+  if (type && !ALLOWED.has(type)) issues.push('Неподдерживаемый формат');
+  if (!actual) issues.push('Не удалось подтвердить формат по содержимому файла');
+  if (!expected) issues.push('Неподдерживаемое расширение файла');
+  if (actual && ((type && type !== actual) || (expected && expected !== actual))) {
+    issues.push('Содержимое файла не совпадает с расширением или MIME-типом');
+  }
   if (file.size <= 0) issues.push('Пустой файл');
   if (file.size > rules.maxBytes) issues.push('Размер превышает лимит');
   if (!dimensions) issues.push('Не удалось прочитать изображение');
-  else {
-    if (dimensions.width < rules.minWidth || dimensions.height < rules.minHeight) issues.push('Разрешение ниже ориентира');
+  else if (dimensions.width < rules.minWidth || dimensions.height < rules.minHeight) {
+    issues.push('Разрешение ниже ориентира');
   }
   return issues;
 }
@@ -41,6 +61,21 @@ export function evaluateEntries(entries, requiredViews = []) {
     output.push(row);
     if (!groups.has(parsed.sku)) groups.set(parsed.sku, []);
     groups.get(parsed.sku).push(row);
+  }
+  // Mark every ambiguous version, not only the last file in upload order.
+  const byView = new Map();
+  for (const row of output) {
+    if (!row.grouped) continue;
+    const key = JSON.stringify([row.sku, row.view]);
+    if (!byView.has(key)) byView.set(key, []);
+    byView.get(key).push(row);
+  }
+  for (const rows of byView.values()) {
+    if (rows.length < 2) continue;
+    const known = rows.every(row => Boolean(row.sha256));
+    if (known && new Set(rows.map(row => row.sha256)).size === 1) continue;
+    const note = 'Несколько версий одного ракурса: выберите утверждённый файл';
+    for (const row of rows) row.issues.push(note);
   }
   const missing = [];
   if (requiredViews.length) {

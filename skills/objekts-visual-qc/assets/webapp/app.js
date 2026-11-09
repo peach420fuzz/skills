@@ -1,4 +1,4 @@
-import { ALLOWED, DEFAULTS, checkFile, evaluateEntries, normalizeViews, reportCSV } from './qc-core.js';
+import { ALLOWED, DEFAULTS, checkFile, evaluateEntries, normalizeViews, reportCSV, signatureMime } from './qc-core.js';
 
 const $ = selector => document.querySelector(selector);
 const $input = $('#files');
@@ -33,8 +33,8 @@ for (const type of ['dragleave', 'drop']) $drop.addEventListener(type, e => { e.
 $drop.addEventListener('drop', e => { if (e.dataTransfer?.files?.length) setFiles(e.dataTransfer.files); });
 $clear.addEventListener('click', () => { $input.value = ''; setFiles([]); $table.replaceChildren(); $missing.replaceChildren(); });
 
-async function dimensions(file) {
-  if (!ALLOWED.has(file.type) || !file.size) return null;
+async function dimensions(file, detectedMime) {
+  if (!ALLOWED.has(detectedMime) || !file.size) return null;
   const url = URL.createObjectURL(file);
   try {
     return await new Promise((resolve, reject) => {
@@ -90,9 +90,16 @@ $run.addEventListener('click', async () => {
   try {
     for (let i = 0; i < selected.length; i++) {
       const file = selected[i];
-      const d = await dimensions(file);
-      const issues = checkFile(file, d, rules);
-      const sha256 = await digest(file);
+      let header = null;
+      try { header = new Uint8Array(await file.slice(0, 16).arrayBuffer()); } catch { /* reported below */ }
+      const d = file.size <= rules.maxBytes ? await dimensions(file, signatureMime(header)) : null;
+      const issues = checkFile(file, d, rules, header);
+      if (file.size > rules.maxBytes) {
+        const i = issues.indexOf('Не удалось прочитать изображение');
+        if (i >= 0) issues[i] = 'Декодирование пропущено: файл превышает лимит';
+      }
+      const sha256 = file.size <= rules.maxBytes ? await digest(file) : '';
+      if (!sha256) issues.push('Проверка дубликатов не выполнена: SHA-256 недоступен или файл превышает лимит');
       entries.push({ name: file.name, size: file.size, type: file.type, width: d?.width ?? null, height: d?.height ?? null, sha256, issues });
       if (i % 5 === 0) { say(`Проверено ${i + 1} из ${selected.length} файлов…`); await new Promise(resolve => setTimeout(resolve, 0)); }
     }
